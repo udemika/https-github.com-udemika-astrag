@@ -1,0 +1,6 @@
+{
+  "name": "AstraG Broadcast Optimization & Telemetry Console",
+  "description": "Broadcast stream engineering console for AstraG MPEG-TS/HLS server optimization, real-time 27-channel telemetry on 62.60.250.90, PCR/CC diagnostics, and zero-overhead patch deployment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
