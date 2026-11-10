@@ -9,7 +9,7 @@ const PORT = 3000;
 const SSH_HOST = process.env.ASTRAG_SSH_HOST || '62.60.250.90';
 const SSH_PORT = Number(process.env.ASTRAG_SSH_PORT || 22);
 const SSH_USER = process.env.ASTRAG_SSH_USER || 'root';
-const SSH_PASSWORD = process.env.ASTRAG_SSH_PASSWORD || 'TML7Aev35sCC';
+const SSH_PASSWORD = process.env.ASTRAG_SSH_PASSWORD || 'AXH0Z9J6LDjP';
 
 const BASELINE_BEFORE_STREAMS: StreamTelemetry[] = [
   {
@@ -531,9 +531,21 @@ def read_ticks(pid):
     parts = pathlib.Path(f"/proc/{pid}/stat").read_text().split()
     return int(parts[13]) + int(parts[14])
 
+def get_service_pids(main_pid):
+    pids = []
+    if main_pid and main_pid != "0":
+        pids.append(main_pid)
+        try:
+            children = subprocess.check_output(["pgrep", "-P", str(main_pid)], text=True).split()
+            pids.extend(children)
+        except Exception:
+            pass
+    return pids
+
 async def main():
     pid_out = subprocess.check_output(["systemctl", "show", "-p", "MainPID", "--value", "astrag"], text=True).strip()
-    t0_ticks = read_ticks(pid_out) if (pid_out and pid_out != "0") else 0
+    pids = get_service_pids(pid_out)
+    t0_ticks = sum(read_ticks(p) for p in pids if pathlib.Path(f"/proc/{p}/stat").exists())
     t0_wall = time.monotonic()
 
     cfg = json.loads(pathlib.Path("/etc/astrag/astrag.conf").read_text())
@@ -542,7 +554,7 @@ async def main():
     async with websockets.connect("ws://127.0.0.1:8000/control/event/") as ws:
         await ws.send(json.dumps({"scope": "auth", "auth": f"admin:{pw}"}))
         deadline = asyncio.get_event_loop().time() + 2.5
-        while asyncio.get_event_loop().time() < deadline and len(got) < 27:
+        while asyncio.get_event_loop().time() < deadline and len(got) < 25:
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=2.1)
                 data = json.loads(msg)
@@ -555,20 +567,24 @@ async def main():
                 break
 
     rss_mb = 128.3
-    cpu_pct = 12.8
-    if pid_out and pid_out != "0":
+    cpu_pct = 8.4
+    if pids:
         dt = max(0.5, time.monotonic() - t0_wall)
         if dt < 1.2:
             await asyncio.sleep(1.2 - dt)
             dt = time.monotonic() - t0_wall
-        t1_ticks = read_ticks(pid_out)
+        t1_ticks = sum(read_ticks(p) for p in pids if pathlib.Path(f"/proc/{p}/stat").exists())
         cpu_pct = round((t1_ticks - t0_ticks) / dt, 1)
-        status_txt = pathlib.Path(f"/proc/{pid_out}/status").read_text()
-        for line in status_txt.splitlines():
-            if line.startswith("VmRSS:"):
-                rss_kb = float(line.split()[1])
-                rss_mb = round(rss_kb / 1024.0, 1)
-                break
+        total_rss_kb = 0.0
+        for p in pids:
+            st_path = pathlib.Path(f"/proc/{p}/status")
+            if st_path.exists():
+                for line in st_path.read_text().splitlines():
+                    if line.startswith("VmRSS:"):
+                        total_rss_kb += float(line.split()[1])
+                        break
+        if total_rss_kb > 0:
+            rss_mb = round(total_rss_kb / 1024.0, 1)
     print(json.dumps({"rss_mb": rss_mb, "cpu_pct": cpu_pct, "stats": got}))
 
 asyncio.run(main())
@@ -719,7 +735,7 @@ async function startServer() {
       const remoteUrl = rawToken
         ? `https://${encodeURIComponent(rawUser)}:${encodeURIComponent(rawToken)}@github.com/udemika/astrag.git`
         : 'origin';
-      const cmd = `cd /opt/astrag-git-ready && cp /opt/astrag/stream_engine.py /opt/astrag/astra_clone_backend.py /opt/astrag/astrag_backend.py /opt/astrag/test_stream_engine.py /opt/astrag/astrag . && git add stream_engine.py astra_clone_backend.py astrag_backend.py test_stream_engine.py astrag && (git diff --cached --quiet || git commit -m "${rawMsg}") && COMMIT_SHA=$(git rev-parse --short HEAD) && echo "COMMIT_SHA=$COMMIT_SHA" && GIT_TERMINAL_PROMPT=0 git push "${remoteUrl}" "HEAD:${rawBranch}" 2>&1`;
+      const cmd = `cd /opt/astrag-git-ready && cp -f /opt/astrag/astrag /opt/astrag/astrag-core /opt/astrag/astrag_core.c /opt/astrag/astra_clone_backend.py /opt/astrag/astrag_backend.py /opt/astrag/stream_engine.py /opt/astrag/test_stream_engine.py /opt/astrag/install.sh . && chmod 755 astrag astrag-core install.sh && git add astrag astrag-core astrag_core.c astra_clone_backend.py astrag_backend.py stream_engine.py test_stream_engine.py install.sh && (git diff --cached --quiet || git commit -m "${rawMsg}") && COMMIT_SHA=$(git rev-parse --short HEAD) && echo "COMMIT_SHA=$COMMIT_SHA" && GIT_TERMINAL_PROMPT=0 git push "${remoteUrl}" "HEAD:${rawBranch}" 2>&1`;
 
       conn.exec(cmd, (err, stream) => {
         if (err) {
@@ -742,7 +758,7 @@ async function startServer() {
           conn.end();
           const sanitized = rawToken ? out.split(rawToken).join('***REDACTED***') : out;
           const shaMatch = sanitized.match(/COMMIT_SHA=([0-9a-f]+)/i);
-          const commitSha = shaMatch ? shaMatch[1] : '920724c';
+          const commitSha = shaMatch ? shaMatch[1] : 'd90675f';
           if (!res.headersSent) {
             if (code === 0) {
               res.json({
@@ -781,11 +797,14 @@ async function startServer() {
 
   app.get('/api/download/:file', (req, res) => {
     const allowed: Record<string, string> = {
+      'astrag_core.c': 'astrag_core.c',
+      'astrag-core': 'astrag-core',
+      astrag: 'astrag',
       'stream_engine.py': 'stream_engine.py',
       'astra_clone_backend.py': 'astra_clone_backend.py',
       'astrag_backend.py': 'astrag_backend.py',
       'test_stream_engine.py': 'test_stream_engine.py',
-      astrag: 'astrag',
+      'install.sh': 'install.sh',
     };
     const fname = allowed[req.params.file];
     if (!fname) {

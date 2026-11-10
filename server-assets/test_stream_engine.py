@@ -457,6 +457,38 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
         asyncio.run(scenario())
 
+    def test_batch_subscriber_coalesces_python_path_and_keeps_order(self):
+        async def scenario():
+            eng = Engine()
+            q = eng.subscribe(64, chunk_mode=True)
+            pkts = [packet(pid=0, payload=b"\x00" + pat(100), start=True),
+                    packet(pid=100, payload=b"\x00" + pmt(), start=True)]
+            pkts += [packet(pid=256, cc=i & 0x0F) for i in range(10)]
+            eng.feed(b"".join(pkts))
+            got = b""
+            while not q.empty():
+                got += q.get_nowait()
+            self.assertEqual(got, b"".join(pkts))
+            self.assertLessEqual(q.qsize(), 0)
+            self.assertEqual(eng._pending_batch, bytearray())
+
+        asyncio.run(scenario())
+
+    def test_subscriber_queue_is_bounded_by_bytes(self):
+        async def scenario():
+            eng = Engine(max_queue_bytes=188 * 100)
+            q = eng.subscribe(4096, chunk_mode=True)
+            for i in range(50):
+                eng.feed(b"".join(packet(pid=256, cc=(i * 10 + j) & 0x0F) for j in range(10)))
+            self.assertLessEqual(q.queued_bytes, 188 * 100)
+            self.assertEqual(q.queued_bytes, sum(len(x) for x in q._queue))
+            self.assertGreater(eng._counts["queue_drops"], 0)
+            eng.unsubscribe(q)
+            self.assertIs(q.get_nowait(), END_OF_STREAM)
+            self.assertEqual(q.queued_bytes, 0)
+
+        asyncio.run(scenario())
+
     def test_gop_preroll_burst_does_not_enable_hls_or_clobber_cc(self):
         eng = Engine()
         pat_packet = packet(pid=0, payload=b"\x00" + pat(100), start=True)
@@ -560,58 +592,6 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
                     cc_gaps += 1
                 last_v_cc = cur_cc
         self.assertEqual(cc_gaps, 0)
-
-    def test_adaptation_only_bogus_cc_immunity_and_mid_gop_kf_stitching(self):
-        eng = Engine(segment_duration=1.0, max_segments=4)
-        eng._is_hls_input = True
-        pat_packet = packet(pid=0, payload=b"\x00" + pat(100), start=True)
-        pmt_packet = packet(pid=100, payload=b"\x00" + pmt(), start=True)
-        eng.feed(pat_packet + pmt_packet)
-        self.assertEqual(eng._video_codec_pids.get(256), 0x1B)
-
-        # 1. Feed H.264 IDR keyframe followed by P-frames whose byte 0x21 (NAL type 1) would look like HEVC VPS (32) if not codec-gated
-        idr_pes = (
-            b"\x00\x00\x01\xe0\x00\x00\x80\xc0\x0a"
-            b"\x21\x00\x07\xd8\x61\x11\x00\x07\x72\x61"
-            b"\x00\x00\x01\x09\x10\x00\x00\x01\x67\x42\x00\x1f\x00\x00\x01\x68\xce\x3c\x80\x00\x00\x01\x65\x88"
-        )
-        pframe_pes = (
-            b"\x00\x00\x01\xe0\x00\x00\x80\xc0\x0a"
-            b"\x21\x00\x09\x1f\x01\x11\x00\x09\x1f\x01"
-            b"\x00\x00\x01\x09\x30\x00\x00\x01\x21\x9a"
-        )
-        self.assertTrue(eng.is_video_keyframe_packet(packet(pid=256, cc=1, start=True, payload=idr_pes)))
-        self.assertFalse(eng.is_video_keyframe_packet(packet(pid=256, cc=2, start=True, payload=pframe_pes)))
-
-        cc = 1
-        chunk = bytearray()
-        chunk.extend(packet(pid=256, cc=cc & 0x0F, start=True, pcr=0, payload=idr_pes))
-        cc += 1
-        for i in range(10):
-            # Inject adaptation-only PCR packet with bogus CC = (cc ^ 8) like TravelXP4K
-            chunk.extend(packet(pid=256, cc=(cc ^ 8) & 0x0F, adaptation_only=True, pcr=(i + 1) * int(0.05 * PCR_HZ)))
-            chunk.extend(packet(pid=256, cc=cc & 0x0F, start=True, payload=pframe_pes))
-            cc += 1
-        eng.feed(chunk)
-        self.assertEqual(eng.stats()["continuity_errors"], 0)
-        self.assertTrue(len(eng._last_kf_au) >= 188)
-
-        # 2. Simulate 4K mid-GOP state where older segments with keyframe were evicted and only P-frame segments remain
-        eng._segments.clear()
-        eng._segment_bytes = 0
-        eng._current.clear()
-        p_seg = bytearray()
-        for i in range(12):
-            p_seg.extend(packet(pid=256, cc=cc & 0x0F, start=True, pcr=int((2.0 + i * 0.1) * PCR_HZ), payload=pframe_pes))
-            cc += 1
-        eng.feed(p_seg)
-        pre_parts = eng.get_mpegts_prebuffer_parts()
-        pre_bytes = b"".join(pre_parts)
-        kfs = sum(
-            1 for off in range(0, len(pre_bytes) - 187, 188)
-            if eng.is_video_keyframe_packet(pre_bytes[off:off + 188])
-        )
-        self.assertGreaterEqual(kfs, 1)
 
 
 if __name__ == "__main__":

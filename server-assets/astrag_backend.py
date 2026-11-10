@@ -285,23 +285,240 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-def make_engine(config):
+def _core_field(value) -> str:
+    return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
+class CoreSupervisor:
+    """Python side of the native astrag-core data plane (child process + control socket)."""
+
+    def __init__(self, proc, ctl_name: str, secret: str, host: str):
+        self.proc = proc
+        self.ctl_name = ctl_name
+        self.secret = secret
+        self.host = host
+        self.writer = None
+        self.pending = []
+        self.stats = {}
+        self.sess_map = {}
+        self.listening = set()
+        self.tasks = []
+
+    async def connect(self):
+        last_exc = None
+        for _ in range(100):
+            try:
+                reader, writer = await asyncio.open_unix_connection("\0" + self.ctl_name)
+                writer.write(f"AUTH\t{self.secret}\n".encode())
+                await writer.drain()
+                line = await asyncio.wait_for(reader.readline(), 5)
+                if line.strip() != b"OK":
+                    raise RuntimeError("astrag-core rejected control connection")
+                self.writer = writer
+                for item in self.pending:
+                    writer.write(item)
+                self.pending.clear()
+                self.tasks = [asyncio.create_task(self._reader(reader)), asyncio.create_task(self._watchdog())]
+                return
+            except (OSError, RuntimeError, asyncio.TimeoutError) as exc:
+                last_exc = exc
+                await asyncio.sleep(0.1)
+        raise RuntimeError(f"cannot connect to astrag-core: {last_exc}")
+
+    def send(self, *fields):
+        data = ("\t".join(_core_field(f) for f in fields) + "\n").encode()
+        if self.writer is None:
+            self.pending.append(data)
+        else:
+            self.writer.write(data)
+
+    def _core_gone(self, what: str):
+        # SIGTERM from systemctl stop/restart reaches the core too: that is a normal shutdown.
+        for _ in range(20):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        rc = self.proc.poll()
+        if rc in (0, -signal.SIGTERM, -signal.SIGINT):
+            os._exit(0)
+        logger.error("astrag-core %s (code %s); restarting service", what, rc)
+        os._exit(1)
+
+    async def _watchdog(self):
+        # The core owns the public ports; without it the service is down, so let systemd restart everything.
+        while True:
+            await asyncio.sleep(1.0)
+            if self.proc.poll() is not None:
+                self._core_gone("exited")
+
+    async def _reader(self, reader):
+        while True:
+            line = await reader.readline()
+            if not line:
+                self._core_gone("control connection closed")
+            try:
+                self._handle(line.decode("utf-8", "replace").rstrip("\n").split("\t"))
+            except Exception:
+                logger.exception("Bad astrag-core message")
+
+    def _handle(self, f):
+        if f[0] == "STAT" and len(f) >= 15:
+            pids = []
+            for item in filter(None, f[11].split(",")):
+                p, k, st = item.split(":")
+                pids.append((int(p), int(k), int(st)))
+            pmts = []
+            for item in filter(None, f[12].split(",")):
+                p, pnr = item.split(":")
+                pmts.append((int(p), int(pnr)))
+            self.stats[f[1]] = {
+                "onair": f[2] == "1", "bitrate": float(f[3]), "cc_errors": int(f[4]), "pes_errors": int(f[5]),
+                "scrambled": f[6] == "1", "input_id": int(f[7]), "packets": int(f[8]), "pcr_pid": int(f[9]),
+                "tsid": int(f[10]), "pids": pids, "pmts": pmts, "input_errors": int(f[13]),
+                "last_error": f[14] or None, "updated": time.monotonic(),
+            }
+        elif f[0] == "SESS+" and len(f) >= 6:
+            core_id = int(f[1])
+            psid = state.next_session
+            state.next_session += 1
+            self.sess_map[core_id] = psid
+            state.sessions[psid] = {
+                "client_id": psid, "channel_id": f[2],
+                "channel_name": state.stream_configs.get(f[2], {}).get("name", ""),
+                "addr": f[3], "login": f[4], "ua": f[5], "sdate": int(time.time() * 1000),
+                "started": time.time(), "queue": None, "engine": state.engines.get(f[2]), "core_id": core_id,
+            }
+        elif f[0] == "SESS-" and len(f) >= 2:
+            psid = self.sess_map.pop(int(f[1]), None)
+            if psid is not None:
+                state.sessions.pop(psid, None)
+
+
+CORE = None
+
+
+def _via_core(request) -> bool:
+    return CORE is not None and request.headers.get("x-astrag-via") == CORE.secret
+
+
+def _core_eligible(config) -> bool:
+    if CORE is None:
+        return False
+    for url in config.get("input", []):
+        if urlsplit(url.split("#", 1)[0]).scheme.lower() not in ("http", "https"):
+            return False
+    for url in config.get("output", []):
+        if urlsplit(url.split("#", 1)[0]).scheme.lower() not in ("http", "https"):
+            return False
+    return True
+
+
+class CoreEngine:
+    """Engine facade for channels served by astrag-core."""
+
+    def __init__(self, config, seg_dur: float, max_segs: int):
+        self.config = config
+        self.sid = config["id"]
+        self.seg_dur = seg_dur
+        self.max_segs = max_segs
+        self._running = False
+        self._started = time.monotonic()
+
+    def start(self):
+        CORE.stats.pop(self.sid, None)
+        CORE.send("ADD", self.sid, f"{self.seg_dur:.3f}", self.max_segs, self.config.get("name", ""),
+                  *self.config["input"])
+        self._running = True
+        self._started = time.monotonic()
+        return self
+
+    def stop(self):
+        if self._running:
+            CORE.send("DEL", self.sid)
+        self._running = False
+        CORE.stats.pop(self.sid, None)
+
+    def unsubscribe(self, queue):
+        return None
+
+    def stats(self, include_pids: bool = True):
+        st = CORE.stats.get(self.sid, {})
+        br = st.get("bitrate", 0.0)
+        out = {
+            "running": self._running, "bitrate": br, "effective_bitrate": br, "average_bitrate": br,
+            "continuity_errors": st.get("cc_errors", 0), "cc_errors": st.get("cc_errors", 0),
+            "pes_errors": st.get("pes_errors", 0), "scrambled": st.get("scrambled", False),
+            "input_id": st.get("input_id", 1), "packets": st.get("packets", 0),
+            "bytes": st.get("packets", 0) * 188, "input_errors": st.get("input_errors", 0),
+            "last_error": st.get("last_error"), "elapsed": time.monotonic() - self._started,
+            "subscribers": sum(1 for s in state.sessions.values() if s.get("channel_id") == self.sid),
+        }
+        if include_pids:
+            out["pids"] = {str(p): {"type": {1: "VIDEO", 2: "AUDIO"}.get(k, "DATA"), "stream_type": t}
+                           for p, k, t in st.get("pids", [])}
+        return out
+
+    def psi_summary(self):
+        st = CORE.stats.get(self.sid, {})
+        pmts = st.get("pmts", [])
+        pat = {"psi": "pat", "tsid": st.get("tsid", 0),
+               "programs": [{"pnr": pnr, "pid": pid} for pid, pnr in pmts]} if pmts else None
+        streams = [{"pid": p, "type_id": t, "type_name": {1: "VIDEO", 2: "AUDIO"}.get(k, "DATA"), "descriptors": []}
+                   for p, k, t in st.get("pids", [])]
+        pmt_list = [{"psi": "pmt", "pnr": pnr, "pid": pid, "pcr": st.get("pcr_pid", 8191), "descriptors": [],
+                     "streams": streams if i == 0 else []} for i, (pid, pnr) in enumerate(pmts)]
+        return {
+            "pat": pat, "pmt": pmt_list, "sdt": None, "nit": None,
+            "total": {"bitrate": int(round(st.get("bitrate", 0) / 1000.0)), "cc_errors": st.get("cc_errors", 0),
+                      "pes_errors": st.get("pes_errors", 0), "scrambled": st.get("scrambled", False)},
+        }
+
+
+def _start_core(host: str, port: int):
+    """Launch astrag-core on the public port; returns (CoreSupervisor, internal_port) or (None, None)."""
+    import secrets
+    import socket as _socket
+    import subprocess
+    core_bin = Path(os.environ.get("ASTRA_CORE_BIN") or (APP_DIR / "astrag-core"))
+    if os.environ.get("ASTRA_CORE", "1") == "0" or not core_bin.is_file() or not os.access(core_bin, os.X_OK):
+        return None, None
+    with _socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        internal = s.getsockname()[1]
+    secret = secrets.token_hex(16)
+    ctl = f"astrag-core-{os.getpid()}-{secrets.token_hex(4)}"
     try:
-        from stream_engine import Engine
-    except ImportError as exc:
-        raise HTTPException(503, "Native stream engine unavailable") from exc
+        proc = subprocess.Popen([str(core_bin), "--ctl", ctl, "--secret", secret, "--upstream", str(internal),
+                                 "--listen", f"{host}:{port}"], stdin=subprocess.DEVNULL)
+    except OSError:
+        logger.warning("astrag-core could not be started; using the Python engine", exc_info=True)
+        return None, None
+    time.sleep(0.4)
+    if proc.poll() is not None:
+        logger.warning("astrag-core exited at startup (code %s); using the Python engine", proc.returncode)
+        return None, None
+    return CoreSupervisor(proc, ctl, secret, host), internal
+
+
+def make_engine(config):
     hls_cfg = state.config.get("hls", {}) if "state" in globals() else {}
     seg_dur = float(hls_cfg.get("duration") or 3.0)
     max_segs = int(hls_cfg.get("quantity") or 5)
     seg_dur = max(1.0, min(10.0, seg_dur))
     max_segs = max(2, min(12, max_segs))
+    if _core_eligible(config):
+        return CoreEngine(config, seg_dur, max_segs)
+    try:
+        from stream_engine import Engine
+    except ImportError as exc:
+        raise HTTPException(503, "Native stream engine unavailable") from exc
     return Engine(
         config["input"],
         outputs=config.get("output", []),
         segment_duration=seg_dur,
         max_segments=max_segs,
-        max_segment_bytes=6 * 1024 * 1024,
-        max_hls_bytes=16 * 1024 * 1024,
+        max_segment_bytes=4 * 1024 * 1024,
+        max_hls_bytes=10 * 1024 * 1024,
         stream_options=config,
     )
 
@@ -505,6 +722,11 @@ class ServerState:
     def close_session(self, sid):
         session = self.sessions.pop(sid, None)
         if session:
+            if session.get("core_id") is not None:
+                if CORE is not None:
+                    CORE.sess_map.pop(session["core_id"], None)
+                    CORE.send("KILL", session["core_id"])
+                return True
             q = session["queue"]
             while not q.empty():
                 q.get_nowait()
@@ -565,6 +787,15 @@ class ServerState:
         if os.environ.get("ASTRA_DISABLE_EXTRA_PORTS") == "1":
             return
         wanted = self.desired_extra_ports(config)
+        if CORE is not None:
+            # Extra public ports are opened by astrag-core and relayed to the same internal server.
+            for p in sorted(CORE.listening - wanted):
+                CORE.send("UNLISTEN", p)
+                CORE.listening.discard(p)
+            for p in sorted(wanted - CORE.listening):
+                CORE.send("LISTEN", HOST, p)
+                CORE.listening.add(p)
+            return
         for p in list(self.extra_servers):
             if p not in wanted:
                 srv, task = self.extra_servers.pop(p)
@@ -686,9 +917,17 @@ class ServerState:
 
 
 async def publish_stats():
+    tick = 0
     prev_errors = {}
     while True:
         await asyncio.sleep(1)
+        tick += 1
+        if tick % 60 == 0:
+            try:
+                from stream_engine import trim_process_memory
+                trim_process_memory()
+            except Exception:
+                pass
         if not state.websocket_clients:
             continue
         active_sids = set(state.engines)
@@ -890,6 +1129,8 @@ async def reload_config():
 @asynccontextmanager
 async def lifespan(app):
     state.lock = asyncio.Lock()
+    if CORE is not None:
+        await CORE.connect()
     await reload_config()
     state.add_log("info", f"{state.version} started on {HOST}:{PORT}")
     loop = asyncio.get_running_loop()
@@ -1336,6 +1577,16 @@ def media_engine(stream_id, request):
     return engine, user, stream_id
 
 
+def _core_handoff(request, *fields):
+    """Tell astrag-core (which relayed this request) to serve the media itself."""
+    if not _via_core(request):
+        raise HTTPException(503, "Media is served through the public port only")
+    from urllib.parse import quote
+    # Percent-encoded and '|'-separated: strict HTTP parsers (h11) reject tabs or trailing blanks in values.
+    directive = "|".join(quote(str(f), safe="") for f in fields)
+    return Response(b"", headers={"X-Astrag-Core": directive})
+
+
 @app.api_route("/play/{stream_id}.m3u8", methods=["GET", "HEAD"])
 @app.api_route("/play/{stream_id}/index.m3u8", methods=["GET", "HEAD"])
 async def play_hls(stream_id: str, request: Request):
@@ -1346,6 +1597,8 @@ async def play_hls(stream_id: str, request: Request):
     token_qs = f"?token={token}" if token else ""
     if "ts" in request.query_params:
         return Response(f"#EXTM3U\n/play/{stream_id}{token_qs}\n", media_type="audio/x-mpegurl")
+    if isinstance(engine, CoreEngine):
+        return _core_handoff(request, "hls", stream_id, f"/play/{stream_id}/segment/", token_qs, request.method)
     segmenter = getattr(engine, "hls", engine)
     wait_fn = getattr(segmenter, "wait_for_hls", None)
     if callable(wait_fn):
@@ -1376,6 +1629,8 @@ async def play_hls(stream_id: str, request: Request):
 @app.api_route("/play/{stream_id}/segment/{segment_name}", methods=["GET", "HEAD"])
 async def play_segment(stream_id: str, segment_name: str, request: Request):
     engine, _, stream_id = media_engine(stream_id, request)
+    if isinstance(engine, CoreEngine):
+        return _core_handoff(request, "seg", stream_id, segment_name, request.method)
     segmenter = getattr(engine, "hls", engine)
     method = getattr(segmenter, "get_segment", None)
     if not callable(method):
@@ -1417,6 +1672,8 @@ async def play_stream(stream_id: str, request: Request):
                 "Access-Control-Allow-Origin": "*",
             },
         )
+    if isinstance(engine, CoreEngine):
+        return _core_handoff(request, "ts", stream_id, user.get("login", ""))
     sub_fn = engine.subscribe
     try:
         sig = inspect.signature(sub_fn)
@@ -1911,6 +2168,14 @@ def main() -> int:
             return "Invalid HTTP request received" not in msg
 
     logging.getLogger("uvicorn.error").addFilter(_SuppressInvalidHttpFilter())
+    global CORE
+    CORE, internal_port = _start_core(HOST, PORT)
+    if CORE is not None:
+        logging.basicConfig(level=logging.INFO)
+        logger.info("astrag-core serves %s:%d; control server on 127.0.0.1:%d", HOST, PORT, internal_port)
+        uvicorn.run(app, host="127.0.0.1", port=internal_port, log_level="warning", access_log=False,
+                    loop="asyncio", proxy_headers=True, forwarded_allow_ips="127.0.0.1")
+        return 0
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning", access_log=False, loop="asyncio")
     return 0
 

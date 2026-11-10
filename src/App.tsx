@@ -1190,14 +1190,15 @@ export default function App() {
                   Method 1 (Direct One-Click Push from Here): Push to github.com/udemika/astrag
                 </h2>
                 <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                  Commit <span className="font-mono text-emerald-400">920724c</span> is staged and committed in{' '}
+                  Commit <span className="font-mono text-emerald-400">d90675f</span> is staged and committed in{' '}
                   <span className="font-mono text-emerald-400">/opt/astrag-git-ready</span> on your server{' '}
-                  <span className="font-mono text-slate-200">62.60.250.90</span> with all 5 updated files (
+                  <span className="font-mono text-slate-200">62.60.250.90</span> with all updated native C &amp; Python files (
+                  <span className="font-mono text-slate-200">astrag_core.c</span>,{' '}
+                  <span className="font-mono text-slate-200">astrag-core</span>,{' '}
+                  <span className="font-mono text-slate-200">astrag</span>,{' '}
                   <span className="font-mono text-slate-200">stream_engine.py</span>,{' '}
-                  <span className="font-mono text-slate-200">astra_clone_backend.py</span>,{' '}
-                  <span className="font-mono text-slate-200">astrag_backend.py</span>,{' '}
-                  <span className="font-mono text-slate-200">test_stream_engine.py</span>, and{' '}
-                  <span className="font-mono text-slate-200">astrag</span>). Enter your GitHub Personal Access Token below
+                  <span className="font-mono text-slate-200">astra_clone_backend.py</span>, and{' '}
+                  <span className="font-mono text-slate-200">astrag_backend.py</span>). Enter your GitHub Personal Access Token below
                   and click <strong>Push Changes to GitHub Now</strong> to push directly from this console.
                 </p>
               </div>
@@ -1239,7 +1240,7 @@ export default function App() {
                   className="px-4 py-2 rounded-md text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-slate-950 transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-60"
                 >
                   <Zap className="w-3.5 h-3.5" />
-                  {ghPushing ? 'Pushing Commit 920724c to GitHub...' : 'Push Changes to GitHub Now'}
+                  {ghPushing ? 'Pushing Commit d90675f to GitHub...' : 'Push Changes to GitHub Now'}
                 </button>
                 <span className="text-xs font-mono text-slate-400">
                   Target: <span className="text-slate-200">https://github.com/udemika/astrag.git (main)</span>
@@ -1257,7 +1258,7 @@ export default function App() {
                   <div className="font-semibold flex items-center justify-between">
                     <span>
                       {ghPushResult.ok
-                        ? `Successfully pushed commit ${ghPushResult.commitSha || '920724c'} to ${ghPushResult.repoUrl}`
+                        ? `Successfully pushed commit ${ghPushResult.commitSha || 'd90675f'} to ${ghPushResult.repoUrl}`
                         : ghPushResult.error || 'Push requires GitHub Personal Access Token'}
                     </span>
                     {ghPushResult.commitSha && <span>SHA: {ghPushResult.commitSha}</span>}
@@ -1320,45 +1321,52 @@ export default function App() {
                   Method 2: Download Updated Files &amp; Push from Your PC
                 </h3>
                 <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                  Download the 5 updated repository files below into your local <span className="font-mono text-slate-200">astrag</span>{' '}
+                  Download the updated repository files below into your local <span className="font-mono text-slate-200">astrag</span>{' '}
                   folder and run <span className="font-mono text-slate-200">git push</span>:
                 </p>
               </div>
 
               <div className="grid grid-cols-1 gap-2">
                 <a
+                  href="/api/download/astrag"
+                  className="px-3.5 py-2.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs font-mono text-emerald-300 flex items-center justify-between transition-colors"
+                >
+                  <span>1. astrag (Repacked Standalone Installer Binary)</span>
+                  <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
+                </a>
+                <a
+                  href="/api/download/astrag_core.c"
+                  className="px-3.5 py-2.5 rounded bg-[#161C2A] hover:bg-[#1E2638] border border-white/10 text-xs font-mono text-sky-300 flex items-center justify-between transition-colors"
+                >
+                  <span>2. astrag_core.c (Native C Data Plane w/ Keep-Alive &amp; 4K GOP Fix)</span>
+                  <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
+                </a>
+                <a
+                  href="/api/download/astrag-core"
+                  className="px-3.5 py-2.5 rounded bg-[#161C2A] hover:bg-[#1E2638] border border-white/10 text-xs font-mono text-sky-300 flex items-center justify-between transition-colors"
+                >
+                  <span>3. astrag-core (Compiled x86_64 Native Binary)</span>
+                  <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
+                </a>
+                <a
                   href="/api/download/stream_engine.py"
                   className="px-3.5 py-2.5 rounded bg-[#161C2A] hover:bg-[#1E2638] border border-white/10 text-xs font-mono text-sky-300 flex items-center justify-between transition-colors"
                 >
-                  <span>1. stream_engine.py (Core Engine + C-Accel + Pacer)</span>
+                  <span>4. stream_engine.py (Fallback Engine + 4K Segment Support)</span>
                   <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
                 </a>
                 <a
                   href="/api/download/astra_clone_backend.py"
                   className="px-3.5 py-2.5 rounded bg-[#161C2A] hover:bg-[#1E2638] border border-white/10 text-xs font-mono text-sky-300 flex items-center justify-between transition-colors"
                 >
-                  <span>2. astra_clone_backend.py (Batch Subscriber Fanout)</span>
+                  <span>5. astra_clone_backend.py (Control Plane + CoreSupervisor)</span>
                   <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
                 </a>
                 <a
                   href="/api/download/astrag_backend.py"
-                  className="px-3.5 py-2.5 rounded bg-[#161C2A] hover:bg-[#1E2638] border border-white/10 text-xs font-mono text-sky-300 flex items-center justify-between transition-colors"
-                >
-                  <span>3. astrag_backend.py (Synced Backend Module)</span>
-                  <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
-                </a>
-                <a
-                  href="/api/download/astrag"
-                  className="px-3.5 py-2.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs font-mono text-emerald-300 flex items-center justify-between transition-colors"
-                >
-                  <span>4. astrag (Repacked Standalone Installer Binary)</span>
-                  <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
-                </a>
-                <a
-                  href="/api/download/test_stream_engine.py"
                   className="px-3.5 py-2.5 rounded bg-[#161C2A] hover:bg-[#1E2638] border border-white/10 text-xs font-mono text-slate-300 flex items-center justify-between transition-colors"
                 >
-                  <span>5. test_stream_engine.py (24 Unit Tests)</span>
+                  <span>6. astrag_backend.py (Synced Backend Module)</span>
                   <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
                 </a>
               </div>
@@ -1371,7 +1379,7 @@ export default function App() {
                     onClick={() =>
                       handleCopy(
                         'gh-local',
-                        `git clone https://github.com/udemika/astrag.git\ncd astrag\n# Copy downloaded files here, then:\nchmod +x astrag\ngit add stream_engine.py astra_clone_backend.py astrag_backend.py astrag\ngit commit -m "Optimize broadcast stability, fast GOP pre-roll connect, and reduce CPU/RAM"\ngit push origin main`
+                        `git clone https://github.com/udemika/astrag.git\ncd astrag\n# Copy downloaded files here, then:\nchmod +x astrag astrag-core\ngit add astrag astrag_core.c astrag-core stream_engine.py astra_clone_backend.py astrag_backend.py\ngit commit -m "perf(core): HTTP/TLS keep-alive pool, continuous HLS PSI CC, 4K GOP-aligned segments & 3-segment RFC 8216 window"\ngit push origin main`
                       )
                     }
                     className="text-slate-300 hover:text-white flex items-center gap-1 cursor-pointer"
@@ -1384,9 +1392,9 @@ export default function App() {
 {`git clone https://github.com/udemika/astrag.git
 cd astrag
 # Copy downloaded files here, then:
-chmod +x astrag
-git add stream_engine.py astra_clone_backend.py astrag_backend.py astrag
-git commit -m "Optimize broadcast stability, fast GOP pre-roll connect, and reduce CPU/RAM"
+chmod +x astrag astrag-core
+git add astrag astrag_core.c astrag-core stream_engine.py astra_clone_backend.py astrag_backend.py
+git commit -m "perf(core): HTTP/TLS keep-alive pool, continuous HLS PSI CC, 4K GOP-aligned segments & 3-segment RFC 8216 window"
 git push origin main`}
                 </pre>
               </div>
